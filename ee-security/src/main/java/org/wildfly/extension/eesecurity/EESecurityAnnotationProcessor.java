@@ -20,6 +20,9 @@
  */
 package org.wildfly.extension.eesecurity;
 
+import java.util.Arrays;
+import java.util.List;
+
 import org.jboss.as.server.deployment.AttachmentKey;
 import org.jboss.as.server.deployment.Attachments;
 import org.jboss.as.server.deployment.DeploymentPhaseContext;
@@ -27,6 +30,7 @@ import org.jboss.as.server.deployment.DeploymentUnit;
 import org.jboss.as.server.deployment.DeploymentUnitProcessingException;
 import org.jboss.as.server.deployment.DeploymentUnitProcessor;
 import org.jboss.as.server.deployment.annotation.CompositeIndex;
+import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.DotName;
 
 class EESecurityAnnotationProcessor implements DeploymentUnitProcessor {
@@ -49,6 +53,7 @@ class EESecurityAnnotationProcessor implements DeploymentUnitProcessor {
     };
 
     static final DotName[] INTERFACES = {
+            DotName.createSimple("jakarta.security.enterprise.SecurityContext"),
             DotName.createSimple("jakarta.security.enterprise.authentication.mechanism.http.HttpAuthenticationMechanism"),
             DotName.createSimple("jakarta.security.enterprise.identitystore.IdentityStoreHandler"),
             DotName.createSimple("jakarta.security.enterprise.identitystore.IdentityStore"),
@@ -63,6 +68,17 @@ class EESecurityAnnotationProcessor implements DeploymentUnitProcessor {
             if (!index.getAnnotations(annotation).isEmpty()) {
                 markAsEESecurity(deploymentUnit);
                 return;
+            }
+        }
+        List<AnnotationInstance> allAnnotations;
+        if (!(allAnnotations = index.getAnnotations(DotName.createSimple("jakarta.inject.Inject"))).isEmpty()) {
+            for (AnnotationInstance annotation : allAnnotations) {
+                // Get class of injection target
+                String aString = annotation.target().toString().split(" ")[0];
+                if (Arrays.asList(INTERFACES).contains(DotName.createSimple(aString))) {
+                    markAsEESecurity(deploymentUnit);
+                    return;
+                }
             }
         }
         for (DotName annotation : INTERFACES) {
