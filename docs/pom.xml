@@ -47,7 +47,7 @@
         <management-model.filename>${server.name}.dmr</management-model.filename>
 
         <wildfly.github.io.dir>
-            ..${file.separator}..${file.separator}wildfly.github.io${file.separator}latest-new
+            ..${file.separator}..${file.separator}wildfly.github.io${file.separator}${product.docs.server.version}
         </wildfly.github.io.dir>
         <jboss.home>${project.build.directory}/wildfly</jboss.home>
         <previousVersion/>
@@ -212,9 +212,7 @@
                                 <argument>--source</argument>
                                 <argument>${wildfly.github.io.dir}</argument> <!-- Directory with new documentation -->
                                 <argument>--source-version</argument>
-                                <argument>${parent.version}</argument> <!-- Version number of the new documentation -->
-                                <argument>--previous</argument>
-                                <argument>latest</argument>
+                                <argument>${product.docs.server.version}</argument> <!-- Version number of the new documentation -->
                                 <argument>--previous-version</argument>
                                 <argument>${previousVersion}</argument> <!-- Version number of the previous documentation -->
                                 <argument>--product</argument>

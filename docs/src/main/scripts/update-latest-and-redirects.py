@@ -15,31 +15,14 @@ import os
 import shutil
 import sys
 from argparse import ArgumentParser, Namespace
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Tuple
+from typing import Tuple, Optional
 from pathlib import Path, PurePath
 from xml.etree import ElementTree
-from xml.etree.ElementTree import SubElement
+from xml.etree.ElementTree import Element
 
-from bs4 import BeautifulSoup, Tag
-
-REDIRECT_TEMPLATE: Tuple[str, str, str, str, str] = (
-    """<!DOCTYPE html>
-<html lang=\"en\">
-  <head>
-    <meta charset=\"UTF-8\">
-    <meta http-equiv=\"refresh\" content=\"0; url=""",
-    """\">
-    <link rel=\"canonical\" href=\"""",
-    """\" />
-  </head>
-  <body>
-    <p>Redirecting to the latest version. If the page doesn't open, click the following link: <a href=\"""",
-    """\">""",
-    """</a></p>
-  </body>
-</html>""",
-)
+from bs4 import BeautifulSoup
 
 REMOVED_REDIRECT_TEMPLATE: Tuple[str, str, str, str, str, str] = (
     """<!DOCTYPE html>
@@ -52,7 +35,7 @@ REMOVED_REDIRECT_TEMPLATE: Tuple[str, str, str, str, str, str] = (
     """\" />
   </head>
   <body>
-    <p>This page does not exist in the latest version (""",
+    <p>The page does not exist in this version (""",
     """). You will be redirected to the last available version in 3 seconds.</p>
     <p>If the page doesn't open, click the following link: <a href=\"""",
     """\">""",
@@ -66,27 +49,38 @@ REL_PATH_PATTERN = re.compile(r"(/)?([^/]+)")
 SITEMAP_NS = "http://www.sitemaps.org/schemas/sitemap/0.9"
 
 
-def rename_directories(
+@dataclass
+class HTMLTagMatch:
+    """Stores the location of a single-line tag (and regex match, if multiple tags are present on one line)"""
+
+    line: Optional[int]
+    col: Optional[int]
+
+    def __init__(self) -> None:
+        self.line = None
+        self.col = None
+
+    def set_match(self, line: int, col: int) -> None:
+        """Set the line and match, if not previously set."""
+        if self.line is None:
+            self.line = line
+            self.col = col
+
+
+def move_directories(
     base_docs_path: Path,
     latest_docs_path: PurePath,
     args: Namespace,
 ) -> None:
-    """Adjust names of the latest directories.
+    """Adjust names and location of the directories.
 
     :param base_docs_path: base directory for documentation
-    :param latest_docs_path: directory for latest docs. If the directory already exists, it is renamed to the previous
-        version (if provided as an argument) or deleted
+    :param latest_docs_path: directory for `latest` docs. If the directory already exists, it is deleted, and the source
+    directory takes its place
     :param args: paths and versions for current and previous documentation
     """
     if Path(latest_docs_path).exists():
-        # Rename to previous directory version if provided
-        if args.previous_version:
-            prev_relative_path = base_docs_path.joinpath(args.previous_version)
-
-            shutil.rmtree(prev_relative_path) if prev_relative_path.exists() else None
-            os.rename(latest_docs_path, prev_relative_path)
-        else:
-            shutil.rmtree(latest_docs_path)
+        shutil.rmtree(latest_docs_path)
 
     os.rename(args.source, latest_docs_path)
     if (versioned_path := base_docs_path.joinpath(args.source_version)).exists():
@@ -107,11 +101,11 @@ def rel_path_replace(matched: re.Match) -> str:
     return replacement
 
 
-def generate_redirect_url(
+def generate_canonical_url(
     base_docs_path: Path,
     canon_file: PurePath,
     canon_dir_path: PurePath,
-    redirect_dirname: str,
+    current_dirname: str,
 ) -> Tuple[PurePath, str]:
     """Returns relative URLs for two files with identical paths, except for one level
 
@@ -119,10 +113,10 @@ def generate_redirect_url(
     :param canon_file: full path of the canonical file
     :param canon_dir_path: full path of the directory immediately below :py:data:`base_docs_path`
         containing :py:data:`canon_file`
-    :param redirect_dirname: name of the directory immediately below :py:data:`base_docs_path`
-        containing the redirect file
+    :param current_dirname: name of the directory immediately below :py:data:`base_docs_path`
+        containing the current file
     """
-    redirect_file = base_docs_path.joinpath(redirect_dirname).joinpath(
+    redirect_file = base_docs_path.joinpath(current_dirname).joinpath(
         canon_file.relative_to(canon_dir_path)
     )
 
@@ -139,39 +133,87 @@ def generate_redirect_url(
     return redirect_file, str(redirect_url).replace(os.sep, "/")
 
 
-def create_redirect(
+def create_canonical_tag(
     base_docs_path: Path,
-    latest_docs_path: PurePath,
-    latest_file: PurePath,
+    current_docs_path: PurePath,
+    current_file: PurePath,
     version: str,
     use_abs_path: bool,
 ) -> None:
-    """Create a versioned redirect for a new documentation page.
+    """Create a canonical link tag for a new documentation page.
 
     :param base_docs_path: base directory for documentation
-    :param latest_docs_path: directory for latest docs
-    :param latest_file: the file a redirect is being created for
-    :param version: name of the latest version
+    :param current_docs_path: directory with documentation being checked
+    :param current_file: the file a redirect is being created for
+    :param version: name of the version to use in the canonical link
     :param use_abs_path: sets redirects to use relative or absolute paths
     """
-    versioned_file, relative_redirect = generate_redirect_url(
-        base_docs_path, latest_file, latest_docs_path, version
+    versioned_file, canonical_url = generate_canonical_url(
+        base_docs_path, current_file, current_docs_path, version
     )
     if use_abs_path:
-        relative_redirect = "/" + str(latest_file.relative_to(base_docs_path)).replace(
+        canonical_url = "/" + str(current_file.relative_to(base_docs_path)).replace(
             os.sep, "/"
         )
+    canonical_tag = f'<link rel="canonical" href="{canonical_url}">'
 
-    os.makedirs(versioned_file.parent, exist_ok=True)
-    with open(versioned_file, "w") as redirect_file:
-        redirect_file.write(relative_redirect.join(REDIRECT_TEMPLATE))
+    with open(current_file, "r") as c_file_io:
+        c_file = c_file_io.readlines()
+
+    # Also record/delete the Match, if HTML elements are collapsed onto a single line
+    existing_canon_tags: list[int] = []
+
+    head_closing_tag = HTMLTagMatch()
+
+    for idx, line in enumerate(c_file):
+        char_offset = 0  # Count chars removed for same line canon links
+        # Don't edit redirect files
+        if re.search("meta.*http-equiv=[\"']refresh[\"']", line):
+            return
+
+        if re.match("^\\s*<link rel=[\"']canonical[\"'].*?>\n$", line):
+            existing_canon_tags.append(idx)
+        elif line_tags := re.findall("<link rel=[\"']canonical[\"'].*?>\\s*", line):
+            char_offset = sum([len(ch) for ch in line_tags])
+            c_file[idx] = re.sub("<link rel=[\"']canonical[\"'].*?>\\s*", "", line)
+
+        if re.match("^\\s*</head>\n$", line) and head_closing_tag.line is None:
+            head_closing_tag.line = idx
+        elif head_close_match := re.search("</head>\\s*", line):
+            # HTML elements are collapsed onto a single line
+            head_closing_tag.set_match(idx, head_close_match.start(0) - char_offset)
+
+    if head_closing_tag.line is None:
+        print(
+            f"Unable to update canonical link for {current_file} due to missing </head> tag"
+        )
+        return
+
+    for idx in sorted(existing_canon_tags, reverse=True):
+        del c_file[idx]
+        if idx < head_closing_tag.line:
+            head_closing_tag.line -= 1
+
+    if head_closing_tag.col is not None:
+        c_file[head_closing_tag.line] = (
+            c_file[head_closing_tag.line][: head_closing_tag.col]
+            + canonical_tag
+            + " "
+            + c_file[head_closing_tag.line][head_closing_tag.col :]
+        )
+    else:
+        c_file.insert(head_closing_tag.line, canonical_tag + "\n")
+
+    with open(current_file, "w") as c_file_io:
+        c_file_io.writelines(c_file)
 
 
 def redirect_removed_file(
     base_docs_path: Path,
     previous_docs_file: PurePath,
+    current_dirname: str,
+    previous_dirname: str,
     current_version: str,
-    previous_version: str,
     use_abs_path: bool,
     product_name: str | None,
 ) -> None:
@@ -181,29 +223,22 @@ def redirect_removed_file(
 
     :param base_docs_path: base directory for documentation
     :param previous_docs_file: path of a file present in the previous version
-    :param current_version: name of the latest version
-    :param previous_version: name of the previous version
+    :param current_dirname: name of the directory with the current version (usually `latest` at this stage)
+    :param previous_dirname: name of the directory with the previous version
+    :param current_version: name of the current version
     :param use_abs_path: sets redirects to use relative or absolute paths
     :param product_name: name of the product, if provided
     """
-    redirect_file, redirect_url = generate_redirect_url(
+    redirect_file, redirect_url = generate_canonical_url(
         base_docs_path,
         previous_docs_file,
-        base_docs_path.joinpath(previous_version),
-        "latest",
+        base_docs_path.joinpath(previous_dirname),
+        current_dirname,
     )
     if use_abs_path:
         redirect_url = "/" + str(
             previous_docs_file.relative_to(base_docs_path)
         ).replace(os.sep, "/")
-
-    # For versioned page of current docs
-    versioned_redirect_file = generate_redirect_url(
-        base_docs_path,
-        previous_docs_file,
-        base_docs_path.joinpath(previous_version),
-        current_version,
-    )[0]
 
     if not Path(redirect_file).exists():
         redirect_file_contents: str
@@ -236,61 +271,58 @@ def redirect_removed_file(
         with open(redirect_file, "w") as red_file_io:
             red_file_io.write(redirect_file_contents)
 
-        os.makedirs(versioned_redirect_file.parent, exist_ok=True)
-        with open(versioned_redirect_file, "w") as ver_red_file_io:
-            ver_red_file_io.write(redirect_file_contents)
 
-
-def redirect_walker(
-    base_docs_path: Path, latest_docs_path: PurePath, version: str, use_abs_path: bool
+def canonical_tag_walker(
+    base_docs_path: Path, current_docs_path: PurePath, version: str, use_abs_path: bool
 ) -> None:
-    """Walk the files contained within the "latest/" directory and create redirects for the versioned path.
+    """Walk the files contained within the "latest/" directory and create canonical link tags.
 
-    Redirects are only created for HTML pages, since they do not consistently work with images, stylesheets, etc.
+    Links are only created for HTML pages, since they do not work with images, stylesheets, etc.
 
     :param base_docs_path: base directory for documentation
-    :param latest_docs_path: directory with new documentation
-    :param version: name of the latest version
+    :param current_docs_path: directory with documentation being checked
+    :param version: name of the version to use in the canonical link
     :param use_abs_path: sets redirects to use relative or absolute paths
     """
 
-    for parent, dirs, files in os.walk(latest_docs_path):
+    for parent, dirs, files in os.walk(current_docs_path):
         for f in files:
             if f.endswith(".html"):
-                create_redirect(
+                create_canonical_tag(
                     base_docs_path,
-                    latest_docs_path,
+                    current_docs_path,
                     PurePath(parent, f),
                     version,
                     use_abs_path,
                 )
 
 
-def redirect_previous_versions(
+def redirect_removed_walker(
     base_docs_path: Path,
-    previous_docs_path: PurePath,
+    current_dirname: str,
+    previous_dirname: str,
     current_version: str,
-    previous_version: str,
     use_abs_path: bool,
     product_name: str | None,
 ) -> None:
     """Create redirects from the previous version of the documentation, if pages have been removed.
 
     :param base_docs_path: base directory for documentation
-    :param previous_docs_path: directory with documentation for previous version
+    :param current_dirname: name of the directory with the current version (usually `latest` at this stage)
+    :param previous_dirname: name of the directory with the previous version
     :param current_version: name of the current version
-    :param previous_version: name of the previous version
     :param use_abs_path: sets redirects to use relative or absolute paths
     :param product_name: name of the product, if provided
     """
-    for parent, dirs, files in os.walk(previous_docs_path):
+    for parent, dirs, files in os.walk(base_docs_path.joinpath(previous_dirname)):
         for f in files:
             if f.endswith("html"):
                 redirect_removed_file(
                     base_docs_path,
                     PurePath(parent, f),
+                    current_dirname,
+                    previous_dirname,
                     current_version,
-                    previous_version,
                     use_abs_path,
                     product_name,
                 )
@@ -313,8 +345,9 @@ def update_sitemap(base_docs_path: Path) -> None:
         for lastmod in link.findall(f"{{{SITEMAP_NS}}}lastmod"):
             link.remove(lastmod)
 
-        lastmod = SubElement(link, f"{{{SITEMAP_NS}}}lastmod")
+        lastmod = Element(f"{{{SITEMAP_NS}}}lastmod")
         lastmod.text = revdate
+        link.insert(1, lastmod)
 
     ElementTree.indent(tree)
     tree.write(
@@ -351,7 +384,7 @@ def setup_argparse() -> ArgumentParser:
         "--source",
         metavar="directory",
         help="Required. Directory containing the latest documentation. This directory will be renamed to `latest`. "
-        + "Any existing directory named `latest` will be removed, unless renamed (see -p, --previous).",
+        + "Any existing directory named `latest` will be removed (see -p, --previous).",
         type=lambda p: Path(p).resolve(),
         required=True,
     )
@@ -359,24 +392,16 @@ def setup_argparse() -> ArgumentParser:
         "-sv",
         "--source-version",
         metavar="version",
-        help="Required. Version of the latest documentation (ex. 28). To be used for versioned redirects. "
+        help="Required. Version of the latest documentation (ex. 28). To be used for versioned documentation. "
         + " Any existing directory with this name will be deleted.",
         required=True,
-    )
-    parser.add_argument(
-        "-p",
-        "--previous",
-        metavar="directory",
-        help="Folder with canonical links to the previous version of the documentation. If previously configured, "
-        "this argument should be `latest`. If used, the argument -pv, --previous-version is also required.",
     )
     parser.add_argument(
         "-pv",
         "--previous-version",
         metavar="version",
-        help="Version of the previous documentation (ex. 27). To be used for redirecting to pages not present in "
-        + "the latest version. Any existing directory with this name will be deleted. If used, the argument "
-        + "-p, --previous is also required.",
+        help="Versioned directory of the previous documentation (ex. 27). To be used for redirecting to pages not"
+        + "present in the latest version.",
     )
     parser.add_argument(
         "--no-absolute-path",
@@ -404,14 +429,6 @@ def setup_argparse() -> ArgumentParser:
 def main():
     args = setup_argparse().parse_args()
 
-    if (args.previous and not args.previous_version) or (
-        args.previous_version and not args.previous
-    ):
-        print(
-            "Both -p, --previous and -pv, --previous-version are required if either argument is provided",
-            file=sys.stderr,
-        )
-        sys.exit(1)
     if not args.source.exists():
         print(f"{args.source} is not a valid directory", file=sys.stderr)
         sys.exit(1)
@@ -419,21 +436,28 @@ def main():
     base_docs_path = Path(args.source.parent)
     latest_docs_path = base_docs_path.joinpath("latest")
 
-    rename_directories(base_docs_path, latest_docs_path, args)
-    redirect_walker(
-        base_docs_path, latest_docs_path, args.source_version, args.absolute_path
-    )
+    move_directories(base_docs_path, latest_docs_path, args)
+    canonical_tag_walker(base_docs_path, latest_docs_path, "latest", args.absolute_path)
 
-    if args.previous:
+    if args.previous_version:
         previous_docs_path = base_docs_path.joinpath(args.previous_version)
-        redirect_previous_versions(
+        canonical_tag_walker(
             base_docs_path,
             previous_docs_path,
-            args.source_version,
             args.previous_version,
+            args.absolute_path,
+        )
+        redirect_removed_walker(
+            base_docs_path,
+            "latest",
+            args.previous_version,
+            args.source_version,
             args.absolute_path,
             args.product,
         )
+
+    # Create versioned directory with the same canonical links
+    shutil.copytree(latest_docs_path, base_docs_path.joinpath(args.source_version))
 
     if args.update_sitemap:
         update_sitemap(base_docs_path)

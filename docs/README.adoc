@@ -65,59 +65,43 @@ it's likely best to checkout a new branch for to update the documentation.
 
 === Copy Site [[copy-site]]
 
-The `wildfly.github.io/latest/` path is the canonical link for documentation on the most recent version of WildFly, with pages in the versioned directory redirecting to this link (ex. if the latest version is `28`, the link https://docs.wildfly.org/28/index.html will redirect to https://docs.wildfly.org/latest/index.html). When updating documentation, the versioned directory (containing redirects) should be deleted, and the `latest/` folder should be renamed to that version; then a new `latest/` folder is created for the next release, with versioned redirects for the updated documentation. The Mermaid diagram below demonstrates how an upgrade works (or https://mermaid.live/edit#pako:eNp1UsFuwjAM_RXLu2wSBdFNArWC03bbLttx2SE0LkRKkypJ2VDVf59DmRCI-RLH9vOzX9Jj5RRhgbVx39VO-giv76WwwBa6zdbLdgcbqp0n-BR48u6NjBQi7MkH7SzoAPniQeDXCZnM5QsG5IsZhyGbgielPVUxQHQwzdZg5pwfG83OULLqml7WkXxiH51b5MsrcpsvE_nyf_L8FnkyM4csA4Gh8rqNjLSyoSPu7vGp5H3SAV3QdsuFrae9dl3I_qZxbeRDIOfWPMZZg0tpOP0Dqu8Fxh0vME7n_CFto8hQJCVwGK41Oem_Wq3WoywlTrAh30it-BH7VJVaUkMCC3YV1bIzUaCwA5fKLrqPg62wiL6jCXatYg2etWSlm8vgi9I8EBa1NIGDdLy-jZ_l-GeGXwcUsxs[view in the live editor]):
+The `wildfly.github.io/latest/` path is the canonical link for documentation on the most recent version of WildFly, with pages in the versioned directory referring to them (ex. if the latest version is `28`, the page https://docs.wildfly.org/28/index.html will include a `<link rel='canonical'>` tag pointing to https://docs.wildfly.org/latest/index.html). When updating documentation, these references should be deleted, and the next version should add them. The code block below demonstrates how an upgrade works:
 
-[source,mermaid]
+[source,html]
 ----
-flowchart LR;
-    subgraph before ["before (latest version is 27)"];
-        o27["27/"] -. redirects to .-> l1["latest/"];
-    end;
-    subgraph after ["after (latest version is 28)"];
-        n28["28/"] -. redirects to .-> l2["latest/"];
-        l1 -- "script renames to #34;27/#34; using --previous-version option" --> n27["27/"];
-        o27 --x d{{"this directory is deleted"}}
-    end;
-    before ===> after;
+```html
+<!--
+    BEFORE
+-->
+
+<!-- 27/index.html and latest/index.html -->
+<link rel='canonical' href='https://docs.wildfly.org/latest/index.html'>
+
+<!--
+    AFTER
+-->
+
+<!-- 28/index.html and latest/index.html -->
+<link rel='canonical' href='https://docs.wildfly.org/latest/index.html'>
+<!-- 27/index.html -->
+<link rel='canonical' href='https://docs.wildfly.org/27/index.html'>
 ----
 
 You can deploy a new version of the WildFly documentation by running `mvn clean package -Pcopy-site -DpreviousVersion=<prevVer>`, where `<prevVer>` refers to the previous version of the documentation (ex. 27). The Python script called requires BeautifulSoup (install with `pip install beautifulsoup4`)
 
-This attempts to copy the site to `../../wildfly.github.io/latest-new`, and then renames folders and creates redirects as needed. This path be overridden with the `wildfly.github.io.dir` property.
+This attempts to copy the site to `../../wildfly.github.io/${product.docs.server.version}`, and then renames folders and creates redirects as needed. This path be overridden with the `wildfly.github.io.dir` property.
 
 === Edit and Build Index
 
 Next in the `wildfly.github.io` repository you'll need to edit the `index.adoc` and add the newly created directory. We
-try to keep the listings in release order with the new release on top. Only the versioned URLs
-should be used.
+try to keep the listings in release order with the new release on top.
 
 Once you edit the `index.adoc` you'll need to regenerate the `index.html` file. This can be done with the `asciidoctor`
 command.
-
-You should also update the `sitemap.xml` with the latest versions.
 
 [source]
 ----
 asciidoctor index.adoc
 ----
 
-After all that is complete, you can commit your changes and submit a PR. Since many files will be moved and renamed, splitting into multiple commits makes this simpler to follow. The below script can be run after all changes are made, instead of making changes between commits:
-
-[source,shell]
-----
-# Run from the root documentation directory, where '27' was the previous version.
-
-git rm -r --cached "27/*.html"
-git commit -m "Remove redirection pages for WildFly 27"
-
-git add "27/"
-git rm -r --cached "latest/"
-git commit -m "Move docs to versioned directory for WildFly 27"
-
-git add latest/ "28/"
-git rm -r --cached "28/*.html"
-git commit -m "Generate canonical links for WildFly 28"
-
-git add "28/" "sitemap.xml"
-git commit -m "Generate redirection pages for WildFly 28"
-----
+After all that is complete, you can commit your changes and submit a PR.
